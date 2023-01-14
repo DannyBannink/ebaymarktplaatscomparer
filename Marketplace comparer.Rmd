@@ -1,0 +1,203 @@
+---
+title: "eBay and Marktplaats listings comparer"
+output: html_notebook
+---
+
+### Data understanding
+## Loading libraries
+```{r}
+library(shiny)
+library(rvest)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(httr)
+library(jsonlite)
+library(fixerapi)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(plotly)
+library(psych)
+```
+
+
+# Whenever "(Functionality)" is mentioned, this means that this codechunk is an improvement of previous versions.
+
+### (Functionality) First a search term has to be determined. The goal of this search term is to prevent the search, copying and pasting of an URL link 
+```{r}
+search_term <- "Nikon D610"
+```
+
+## Adjusting the marktplaats weblink so the url is usable for scraping
+```{r}
+base_url_m <- "https://www.marktplaats.nl/q/"
+search_term_m <- gsub(" ", "+", search_term) 
+linkm <- paste0(base_url_m,search_term_m )
+```
+
+## Adjusting the ebay weblink so the url is usable for scraping
+```{r}
+base_url_e <- "https://www.ebay.com/sch/i.html?_nkw=" 
+search_term_e <- gsub(" ", "+", search_term)
+linke <- paste0(base_url_e, search_term_e)
+```
+
+## Script to scrape Marktplaats listings (Source: https://www.youtube.com/watch?v=v8Yh_4oE-Fs&ab_channel=Dataslice)
+```{r}
+# Read the HTML code from a web page
+#linkm <- "https://www.marktplaats.nl/q/xbox+series+x/"
+pagem <- read_html(linkm)
+
+# Extract the text of all paragraph elements on the page
+namem <- html_nodes(pagem, ".hz-Listing-title") %>% html_text() # All links are listed
+camera_linksm <- html_nodes(pagem, ".hz-Listing-title") %>% 
+  html_attr("href") %>% paste("https://www.marktplaats.nl", . , sep = "") # 'a' tags (href's) are pasted behind marktplaats.com
+price_euro <- html_nodes(pagem, ".hz-text-price-label") %>% html_text() # Prices are listed
+
+
+resultsm <- data.frame(namem, price_euro, stringsAsFactors = TRUE) # All listings are combined in 1 dataframe
+print(resultsm)
+```
+
+## Script to scrape eBay listings (https://stackoverflow.com/questions/49067012/looping-through-in-web-scraping-in-r)
+```{r}
+html <- read_html(linke) # Read the HTML from the URL
+listings <- html_nodes(html, "li.s-item") # Find all the listings on the page
+
+# Create an empty dataframe to store the results
+resultse <- data.frame(title = character(), price = character(), condition = character(), shipping = character())
+
+for (listing in listings) { # Loop through each listing and extract the relevant information
+  title <- html_text(html_node(listing, ".s-item__title")) %>% trimws() # Extract all titles
+  price_dollar <- html_text(html_node(listing, "span.s-item__price")) %>% trimws() # Extract all corresponding prices
+  shipping <- html_text(html_node(listing, "span.s-item__shipping.s-item__logisticsCost")) %>% trimws()
+
+  # Append the information to the dataframe
+  resultse <- resultse %>% rbind(data.frame(title, price_dollar))
+}
+print(resultse)
+```
+### Data preperation
+
+## Since there is a difference in the value of 1 euro and 1 dollar, both listings should have 1 extra column. A column which counterparts the currency of the other. This way, the listings in from both sources are easier to compare.
+
+# (Functionality) Here a webpage is scraped for the conversion rate for EUR to USD. (I used the FIXER API playground, filled in right numbers and got a Python script in order to get the conversion rate. I translated it to R format, which resulted in the following code.)
+```{r}
+fixer_convert <- function(from, to, amount) {
+  url <- "https://api.apilayer.com/fixer/convert" # Set the base URL for the API
+  query <- list(to = to, from = from, amount = amount) # Set the query parameters
+  headers <- c(`apikey` = "afWRI37BeB3H2586MOPh0MeTnpNOmlVj") # Set the headers
+  response <- GET(url, query = query, add_headers(headers)) # Send the GET request to the API
+  status_code <- status_code(response) # Extract the status code and response body
+  result <- content(response, as = "text")
+  parsed_response <- fromJSON(result) # Parse the JSON string into a list
+  result_value <- parsed_response$result # Extract the value of "result"
+  return(result_value) # Return the result
+}
+```
+
+# With the written function, now the conversion rates can be retracted from the FIXER API 
+```{r}
+EURUSD <- fixer_convert("EUR", "USD", 1)
+EURUSD
+USDEUR <- fixer_convert("USD", "EUR", 1)
+USDEUR
+```
+
+## Now the dataframe has to be adjusted in order to make it usable
+```{r}
+resultsm$price_euro <- gsub("\\.", "", resultsm$price_euro) # Than periods have to be deleted
+resultsm$price_euro <- gsub("[^0-9.]", "", resultsm$price_euro) # Fist all non-numeric values have to be deleted
+resultsm <- resultsm %>% filter(grepl("[0-9]", price_euro)) # Than rows with non numeric characters are deleted as last
+resultsm$price_euro <- as.numeric(resultsm$price_euro) # The column has to be numeric in order to work with further
+resultsm$price_euro <- round(resultsm$price_euro/100) # It was not possible to make a decimal period, therefore the numbers simply are divided by 100
+resultsm$price_dollar <- round(resultsm$price_euro * EURUSD) # A new column is made with the exchange ratio
+resultsm <- mutate(resultsm, source = "marktplaats") # This column is made to be able to refer back to the source of the listing
+resultsm <- rename(resultsm, title = namem)
+head(resultsm)
+```
+
+
+## Adjusting the resultse dataframe in order to make it bindable with resultsm dataframe
+```{r}
+resultse$price_dollar <- gsub("[^0-9.]", "", resultse$price_dollar) # Fist all non-numeric values have to be deleted
+resultse <- resultse %>% filter(grepl("[0-9]", price_dollar)) # Than rows with non numeric characters are deleted as last
+resultse$price_dollar <- round(as.numeric(resultse$price_dollar)) # Making the numbers adjustable
+resultse <- na.omit(resultse) # Delete rows with na values
+resultse$price_euro <- round(resultse$price_dollar * USDEUR) # A new column is made with the exchange ratio
+resultse <- mutate(resultse, source = "ebay")
+head(resultse)
+```
+
+# Now the marktplaats dataframe (resultsm) will get an extra column which consists of the dollar cost of the listings. But first, the euro sign has to be removed from the cells, since because of this it isn't possible to calculate the value of the camera in dollars
+```{r}
+resultse <- resultse %>% arrange(!!!names(resultsm)) # Reorder the columns in resultse to match the order of the columns in resultsm
+result <- bind_rows(resultse, resultsm) # Bind the two data frames
+result <- result %>% select(title, price_dollar, price_euro, source) # Re-ordering the columns
+mean_price <- mean(result$price_dollar)
+result <- result %>% filter(price_dollar >= 0.3 * mean_price) # Listings with prices lower than 30% of the mean are deleted immediately
+head(result)
+```
+
+### Data modelling
+## When looked at obtained dataset, there are several adjustments to be made. 1 is that there seem so be strange outliers in the price of the Nikon D610's and different greats
+```{r}
+resultsm <- resultsm %>% mutate(row_index = row_number())
+resultse <- resultse %>% mutate(row_index = row_number())
+result <- result %>% mutate(row_index = row_number())
+ggplot(data = result, mapping = aes(x = row_index, y = price_euro)) + geom_point() 
+# Based on the scatterplot it can be said that the values differ a lot. This might be the case because some listings are only a part of the targeted item, or other listings have additional items to the targeted item. Therefore the most common range should be deducted from the dataset to determine what the average cost of the targeted item itself is. 
+```
+# In order to detect the outliers, the cooksd has to be defined. # The cooksd is used to detect outliers which possibly are listings from eBay or Marktplaats which do not fit the targeted item
+```{r}
+result$price_dollar_std <- scale(result$price_dollar) # Standardize the data
+std_dev <- sd(result$price_dollar_std) # Calculate the standard deviation of the standardized data
+threshold <- 1 * std_dev # Define a threshold value for identifying outliers 
+outliers <- result$price_dollar_std > threshold # Make a vector in the global environment to refer back to for the scatterplot
+outliers1 <- as.numeric(rownames(result)[outliers]) # Vector is made to see the results of the standard deviation detection
+```
+
+# A scatterplot is made which also shows the outliers in red
+```{r}
+ggplot(data = result, mapping = aes(x = row_index, y = price_euro)) + 
+  geom_point(color = ifelse(outliers, "red", "black")) +
+  labs(title = "Scatter Plot with Standard deviation Outlier Detection", x = "Row Index", y = "Price (Euro")
+
+plot1 <- plot + geom_text_repel(data = result[outliers, ], aes(label = row_index), size = 3, color = "red")
+```
+# The red dots are the values that most likely are parts for the targeted item, or on the other hand the targeted item + extra items. A new dataframe will be created for the usable listings (outliers are deleted)
+```{r}
+cleandf <- result[-outliers1,]
+ggplot(data = cleandf, mapping = aes(x = row_index, y = price_euro)) + geom_point() +
+  labs(title = "Scatterplot of all approved listings")
+# The data is clean now, and analysis can be put in place to determine which of the 2 marketplaces are cheaper
+summary(cleandf)
+```
+# This looks like a nice dataset to compare results with. Now lets visualize how high the prices are from each marketplace
+```{r}
+cleandf$row_index <- seq(1, nrow(cleandf)) # New row_index is made for a cleaner bar plot result
+barplotsd <- ggplot(data = cleandf, aes(x = row_index, y = price_dollar)) +
+  geom_col(aes(color = source)) +
+  geom_hline(aes(yintercept = min(subset(cleandf, source == "marktplaats")$price_dollar), color = "marktplaats"), linetype = "solid") +
+  geom_hline(aes(yintercept = min(subset(cleandf, source == "ebay")$price_dollar), color = "ebay"), linetype = "solid") +
+  labs(title = paste0("Bar Plot with prices of ", search_term, " (outlier intolerant)"), x = "Row Index", y = "Price (dollar)")
+barplotsd
+```
+```{r}
+result$row_index <- seq(1, nrow(result)) # New row_index is made for a cleaner bar plot result
+ggplot(data = result, aes(x = row_index, y = price_dollar)) +
+  geom_col(aes(color = source)) +
+  geom_hline(aes(yintercept = min(subset(result, source == "marktplaats")$price_dollar), color = "marktplaats"), linetype = "solid") +
+  geom_hline(aes(yintercept = min(subset(result, source == "ebay")$price_dollar), color = "ebay"), linetype = "solid") +
+  labs(title = "Bar Plot with prices of each item (outlier tolerant)", x = "Row Index", y = "Price (dollar)")
+```
+# In order to print the difference between the 2 lowest prices of a Marktplaats listing and a Ebay listing, it first has to be calculated
+```{r}
+
+```
+
+
+
+
+
