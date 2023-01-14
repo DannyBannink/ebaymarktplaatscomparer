@@ -192,10 +192,7 @@ ggplot(data = result, aes(x = row_index, y = price_dollar)) +
   geom_hline(aes(yintercept = min(subset(result, source == "ebay")$price_dollar), color = "ebay"), linetype = "solid") +
   labs(title = "Bar Plot with prices of each item (outlier tolerant)", x = "Row Index", y = "Price (dollar)")
 ```
-# In order to print the difference between the 2 lowest prices of a Marktplaats listing and a Ebay listing, it first has to be calculated
-```{r}
 
-```
 
 
 
